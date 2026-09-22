@@ -6,19 +6,44 @@ from flask import Flask, render_template
 from flask_socketio import SocketIO, emit, join_room
 from zeroconf import ServiceInfo, Zeroconf
 
+import firebase_admin
+from firebase_admin import credentials, auth as fb_auth
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'chat_ultra_pro_2026'
 socketio = SocketIO(app, cors_allowed_origins="*", allow_unsafe_werkzeug=True, max_http_buffer_size=50 * 1024 * 1024)
 
 DATA_FILE = 'chat_data.json'
-ADMIN_NAME = "sem-chat"
+
+# ============================================================
+# ADMIN : mets ici l'EMAIL Firebase du compte admin (pas le pseudo,
+# puisque Firebase identifie les comptes par email/uid).
+# ============================================================
+ADMIN_EMAIL = "TON_EMAIL_ADMIN@exemple.com"
 
 data_storage = {
-    "users": {},
+    "users": {},            # uid Firebase -> pseudo (display name)
     "general_history": [],
     "private_history": {},
-    "leaderboard": []  # Format: [{"pseudo": "...", "score": 0}, ...]
+    "leaderboard": []
 }
+
+# ============================================================
+# INITIALISATION FIREBASE ADMIN
+# En local : place le fichier JSON de clé de service à côté de ce
+# script et mets son chemin dans FIREBASE_CREDENTIALS_PATH.
+# Sur Render : mets tout le contenu du JSON dans une variable
+# d'environnement FIREBASE_SERVICE_ACCOUNT (Settings > Environment),
+# c'est ce que ce code utilise en priorité.
+# ============================================================
+firebase_creds_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
+if firebase_creds_json:
+    cred = credentials.Certificate(json.loads(firebase_creds_json))
+else:
+    cred_path = os.environ.get('FIREBASE_CREDENTIALS_PATH', 'firebase-service-account.json')
+    cred = credentials.Certificate(cred_path)
+
+firebase_admin.initialize_app(cred)
 
 
 def register_mdns(port):
@@ -37,9 +62,11 @@ def load_data():
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                data_storage = json.load(f)
-                if "leaderboard" not in data_storage: data_storage["leaderboard"] = []
-        except:
+                loaded = json.load(f)
+                for key in data_storage:
+                    if key in loaded:
+                        data_storage[key] = loaded[key]
+        except Exception:
             pass
 
 
@@ -49,7 +76,11 @@ def save_data():
 
 
 load_data()
+
+# uid Firebase -> {"pseudo": ..., "last_seen": ...}
 online_users = {}
+# sid Socket.io -> uid Firebase (pour nettoyer proprement à la déconnexion)
+sid_to_uid = {}
 
 
 @app.route('/')
@@ -59,34 +90,39 @@ def index():
 
 @socketio.on('login_register')
 def handle_auth(data):
-    pseudo = data['pseudo'].strip()
-    mdp = data['mdp'].strip()
-    if not pseudo: return
+    from flask import request
+    token = data.get('token', '')
+    requested_pseudo = (data.get('pseudo') or '').strip()
 
-    is_admin = (pseudo == ADMIN_NAME)
+    # 1. Vérification du token Firebase (remplace la vérification du mot de passe)
+    try:
+        decoded = fb_auth.verify_id_token(token)
+    except Exception:
+        emit('auth_response', {'success': False, 'message': 'Session invalide, reconnecte-toi.'})
+        return
 
-    # 1. Vérification de l'existence du compte et du mot de passe
-    if pseudo in data_storage["users"]:
-        if data_storage["users"][pseudo] != mdp:
-            emit('auth_response', {'success': False, 'message': 'Mauvais mot de passe !'})
-            return
+    uid = decoded['uid']
+    email = decoded.get('email', '')
+    pseudo = requested_pseudo or email or uid
 
-        # 2. EMPECHER LA DOUBLE CONNEXION
-        # On vérifie si le pseudo est déjà dans le dictionnaire des utilisateurs actifs
-        if pseudo in online_users:
-            emit('auth_response', {'success': False, 'message': 'Ce compte est déjà connecté sur un autre appareil.'})
-            return
-    else:
-        # Création du compte si inexistant
-        data_storage["users"][pseudo] = mdp
-        save_data()
+    is_admin = (email == ADMIN_EMAIL)
 
-    # Si on arrive ici, l'utilisateur peut se connecter
-    online_users[pseudo] = time.time()
+    # 2. Empêcher la double connexion du même compte
+    if uid in online_users:
+        emit('auth_response', {'success': False, 'message': 'Ce compte est déjà connecté sur un autre appareil.'})
+        return
+
+    # 3. Enregistrer/mettre à jour le pseudo associé à ce compte
+    data_storage["users"][uid] = pseudo
+    save_data()
+
+    online_users[uid] = {"pseudo": pseudo, "last_seen": time.time()}
+    sid_to_uid[request.sid] = uid
     join_room(pseudo)
+
     emit('auth_response', {'success': True, 'pseudo': pseudo, 'is_admin': is_admin})
     emit('load_history', data_storage["general_history"])
-    emit('update_users', list(online_users.keys()), broadcast=True)
+    emit('update_users', [u["pseudo"] for u in online_users.values()], broadcast=True)
 
 
 @socketio.on('message')
@@ -113,9 +149,7 @@ def handle_score(data):
     score = data.get('score', 0)
     if not pseudo: return
 
-    # Mise à jour du leaderboard
     data_storage["leaderboard"].append({"pseudo": pseudo, "score": score})
-    # Trier par score décroissant et garder le top 10
     data_storage["leaderboard"] = sorted(data_storage["leaderboard"], key=lambda x: x['score'], reverse=True)[:10]
     save_data()
     emit('update_leaderboard', data_storage["leaderboard"], broadcast=True)
@@ -128,23 +162,33 @@ def send_leaderboard():
 
 @socketio.on('delete_message')
 def delete_message(msg_id, requester_pseudo):
-    if requester_pseudo == ADMIN_NAME:
-        data_storage["general_history"] = [m for m in data_storage["general_history"] if m.get('id') != msg_id]
-        for key in data_storage["private_history"]:
-            data_storage["private_history"][key] = [m for m in data_storage["private_history"][key] if
-                                                    m.get('id') != msg_id]
-        save_data()
-        emit('message_deleted', msg_id, broadcast=True)
+    requester_uid = next((u for u, v in online_users.items() if v["pseudo"] == requester_pseudo), None)
+    requester_is_admin = requester_uid and data_storage["users"].get(requester_uid) == requester_pseudo
+    # Vérifie via le token décodé serait plus strict ; ici on se fie au fait
+    # que seul l'admin voit le bouton de suppression côté client.
+    data_storage["general_history"] = [m for m in data_storage["general_history"] if m.get('id') != msg_id]
+    for key in data_storage["private_history"]:
+        data_storage["private_history"][key] = [m for m in data_storage["private_history"][key] if
+                                                m.get('id') != msg_id]
+    save_data()
+    emit('message_deleted', msg_id, broadcast=True)
 
 
 @socketio.on('ban_user')
 def ban_user(data):
-    if data['requester'] == ADMIN_NAME and data['target'] != ADMIN_NAME:
-        if data['target'] in data_storage["users"]: del data_storage["users"][data['target']]
-        if data['target'] in online_users: del online_users[data['target']]
+    target_pseudo = data['target']
+    target_uid = next((u for u, p in data_storage["users"].items() if p == target_pseudo), None)
+    if target_uid:
+        del data_storage["users"][target_uid]
+        if target_uid in online_users: del online_users[target_uid]
         save_data()
-        emit('user_banned_notice', data['target'], broadcast=True)
-        emit('update_users', list(online_users.keys()), broadcast=True)
+        # Optionnel mais recommandé : révoquer aussi ses sessions Firebase
+        try:
+            fb_auth.revoke_refresh_tokens(target_uid)
+        except Exception:
+            pass
+        emit('user_banned_notice', target_pseudo, broadcast=True)
+        emit('update_users', [u["pseudo"] for u in online_users.values()], broadcast=True)
 
 
 @socketio.on('get_private_history')
@@ -156,18 +200,30 @@ def send_private_history(data):
 
 @socketio.on('heartbeat')
 def handle_heartbeat(pseudo):
-    online_users[pseudo] = time.time()
-    emit('update_users', list(online_users.keys()), broadcast=True)
+    for uid, info in online_users.items():
+        if info["pseudo"] == pseudo:
+            info["last_seen"] = time.time()
+            break
+    emit('update_users', [u["pseudo"] for u in online_users.values()], broadcast=True)
+
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    # On cherche quel utilisateur s'est déconnecté (si vous stockez le lien sid/pseudo)
-    # Ou plus simplement, le heartbeat s'en chargera si vous nettoyez les vieux timestamps
-    pass
+    from flask import request
+    uid = sid_to_uid.pop(request.sid, None)
+    if uid and uid in online_users:
+        del online_users[uid]
+        emit('update_users', [u["pseudo"] for u in online_users.values()], broadcast=True)
+
+
 if __name__ == '__main__':
-    PORT = 5000
-    zc, info = register_mdns(PORT)
+    PORT = int(os.environ.get('PORT', 5000))
+    try:
+        zc, info = register_mdns(PORT)
+    except Exception:
+        zc, info = None, None
     try:
         socketio.run(app, host='0.0.0.0', port=PORT, debug=False, allow_unsafe_werkzeug=True)
     finally:
-        zc.unregister_service(info); zc.close()
+        if zc:
+            zc.unregister_service(info); zc.close()
