@@ -185,3 +185,20 @@ def handle_disconnect():
     if request.sid in active_sessions:
         del active_sessions[request.sid]
         emit('update_users', [s["pseudo"] for s in active_sessions.values()], broadcast=True)
+@socketio.on('get_private_history')
+def send_private_history(data):
+    session = active_sessions.get(request.sid)
+    if not session:
+        return
+
+    user_pseudo = session["pseudo"]  # Récupéré depuis la session serveur sécurisée
+    target = data.get('target')
+
+    if not target:
+        return
+
+    # Clé de salon unique alphabétique (ex: "Alice-Bob")
+    room_key = "-".join(sorted([user_pseudo, target]))
+    history = data_storage["private_history"].get(room_key, [])
+    
+    emit('load_private_history', {'target': target, 'history': history})
