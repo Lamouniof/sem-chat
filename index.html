@@ -213,6 +213,42 @@
         let myPseudo = "", isAdmin = false, currentTab = "Général";
         let conversations = { "Général": [] };
         let unreadCounts = {};
+        let currentTarget = 'Général';
+
+// 1. Mettre à jour la liste des utilisateurs en ligne et ajouter le clic
+socket.on('update_users', function(users) {
+    const userList = document.getElementById('user-list');
+    userList.innerHTML = '<li onclick="selectTarget(\'Général\')"><b># Général</b></li>';
+    
+    users.forEach(user => {
+        if (user !== myPseudo) { // Éviter de s'afficher soi-même
+            userList.innerHTML += `<li onclick="selectTarget('${user}')">👤 ${user}</li>`;
+        }
+    });
+});
+
+// 2. Sélectionner une conversation (Général ou Privée)
+function selectTarget(target) {
+    currentTarget = target;
+    document.getElementById('chat-header').innerText = "Discussion avec : " + target;
+    document.getElementById('messages').innerHTML = ''; // Vider la fenêtre de tchat
+
+    if (target === 'Général') {
+        socket.emit('login_register', { token: myFirebaseToken, pseudo: myPseudo }); // Recharge le général
+    } else {
+        // Demander l'historique privé pour cette cible
+        socket.emit('get_private_history', { target: target });
+    }
+}
+
+// 3. Réception de l'historique privé
+socket.on('load_private_history', function(data) {
+    if (data.target === currentTarget) {
+        data.history.forEach(msg => {
+            displayMessage(msg);
+        });
+    }
+});
 
         firebase.auth().onAuthStateChanged((user) => {
             if (user) {
