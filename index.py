@@ -202,3 +202,28 @@ def send_private_history(data):
     history = data_storage["private_history"].get(room_key, [])
     
     emit('load_private_history', {'target': target, 'history': history})
+@socketio.on('admin_get_private_history')
+def admin_get_private_history(data):
+    session = active_sessions.get(request.sid)
+    # Vérification stricte du rôle admin côté serveur (ne jamais faire confiance au client)
+    if not session or not session.get('is_admin'):
+        return
+
+    user1 = (data.get('user1') or '').strip()
+    user2 = (data.get('user2') or '').strip()
+    if not user1 or not user2 or user1 == user2:
+        return
+
+    room_key = "-".join(sorted([user1, user2]))
+    history = data_storage["private_history"].get(room_key, [])
+
+    # Journalisation de la consultation, pour la traçabilité/conformité
+    data_storage.setdefault("admin_audit_log", []).append({
+        'ts': time.time(),
+        'admin_pseudo': session["pseudo"],
+        'admin_uid': session["uid"],
+        'inspected_pair': room_key
+    })
+    save_data()
+
+    emit('load_admin_private_history', {'user1': user1, 'user2': user2, 'history': history})
