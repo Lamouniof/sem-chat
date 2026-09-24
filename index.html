@@ -6,10 +6,6 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 
-    <!-- Firebase (Authentication) -->
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
-
     <style>
         body { background: #0f0c29; height: 100vh; display: flex; align-items: center; justify-content: center; font-family: 'Segoe UI', sans-serif; margin: 0; color: white; overflow: hidden; }
         #auth-box { background: white; padding: 2.5rem; border-radius: 20px; width: 380px; color: #333; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
@@ -42,6 +38,7 @@
 
         /* Panneau Admin Espionnage */
         #admin-panel { background: #16213e; border-top: 2px solid #ff4d4d; }
+        #admin-panel .admin-panel-title { color: #ff4d4d; font-weight: bold; margin-bottom: 8px; font-size: 0.85rem; }
 
         /* Snake game */
         #snake-overlay {
@@ -110,7 +107,7 @@
 
                 <!-- BARRE D'ESPIONNAGE ADMIN -->
                 <div id="admin-panel" class="p-3" style="display: none;">
-                    <div class="fw-bold text-danger mb-2 style="font-size: 0.85rem;">🕵️ ESPIONNER DES MP</div>
+                    <div class="admin-panel-title">🕵️ ESPIONNER DES MP</div>
                     <div class="mb-2">
                         <select id="admin-user1" class="form-select form-select-sm bg-dark text-white border-secondary mb-2">
                             <option value="">-- Utilisateur A --</option>
@@ -145,7 +142,24 @@
         </div>
     </div>
 
-    <script>
+    <!-- ============================================================
+         FIREBASE — nouveau SDK modulaire (v9+), chargé via ESM depuis
+         le CDN gstatic. On expose sur window les quelques fonctions
+         dont le reste du code (non-module, classique) a besoin, car
+         un script type="module" a son propre scope isolé.
+         ============================================================ -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-analytics.js";
+        import {
+            getAuth,
+            onAuthStateChanged,
+            signInWithEmailAndPassword,
+            createUserWithEmailAndPassword,
+            updateProfile,
+            signOut
+        } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+
         const firebaseConfig = {
             apiKey: "AIzaSyBQxtrpW96MQ7rWr52ErH3G6aq_06pfO-I",
             authDomain: "sem-chat-40c32.firebaseapp.com",
@@ -155,9 +169,22 @@
             appId: "1:324099007763:web:88278df1985b7e8bab66e6",
             measurementId: "G-L2QVZXJGSF"
         };
-        firebase.initializeApp(firebaseConfig);
-        const auth = firebase.auth();
 
+        const fbApp = initializeApp(firebaseConfig);
+        try { getAnalytics(fbApp); } catch (e) { /* analytics bloqué (ex: adblock) : pas grave, on continue */ }
+
+        const auth = getAuth(fbApp);
+
+        // Pont vers le script classique plus bas (non-module) qui gère
+        // le chat, le pseudo, etc.
+        window.fbSignIn = (email, mdp) => signInWithEmailAndPassword(auth, email, mdp);
+        window.fbSignUp = (email, mdp) => createUserWithEmailAndPassword(auth, email, mdp);
+        window.fbUpdateProfile = (user, profile) => updateProfile(user, profile);
+        window.fbSignOut = () => signOut(auth);
+        window.fbOnAuthStateChanged = (callback) => onAuthStateChanged(auth, callback);
+    </script>
+
+    <script>
         let authMode = "login";
 
         function switchAuthTab(mode) {
@@ -184,11 +211,11 @@
 
             if (authMode === 'register') {
                 if (!pseudo) { showAuthError("Choisis un pseudo."); return; }
-                firebase.auth().createUserWithEmailAndPassword(email, mdp)
-                    .then((cred) => cred.user.updateProfile({ displayName: pseudo }))
+                window.fbSignUp(email, mdp)
+                    .then((cred) => window.fbUpdateProfile(cred.user, { displayName: pseudo }))
                     .catch((err) => showAuthError(traduireErreur(err)));
             } else {
-                firebase.auth().signInWithEmailAndPassword(email, mdp)
+                window.fbSignIn(email, mdp)
                     .catch((err) => showAuthError(traduireErreur(err)));
             }
         }
@@ -198,6 +225,7 @@
                 case 'auth/email-already-in-use': return "Cet email est déjà utilisé.";
                 case 'auth/invalid-email': return "Email invalide.";
                 case 'auth/weak-password': return "Mot de passe trop court (6 caractères min).";
+                case 'auth/unauthorized-domain': return "Ce domaine n'est pas autorisé dans Firebase (Authentication > Settings > Authorized domains).";
                 case 'auth/user-not-found':
                 case 'auth/wrong-password':
                 case 'auth/invalid-credential': return "Email ou mot de passe incorrect.";
@@ -206,51 +234,15 @@
         }
 
         function logout() {
-            firebase.auth().signOut().then(() => location.reload());
+            window.fbSignOut().then(() => location.reload());
         }
 
         const socket = io();
         let myPseudo = "", isAdmin = false, currentTab = "Général";
         let conversations = { "Général": [] };
         let unreadCounts = {};
-        let currentTarget = 'Général';
 
-// 1. Mettre à jour la liste des utilisateurs en ligne et ajouter le clic
-socket.on('update_users', function(users) {
-    const userList = document.getElementById('user-list');
-    userList.innerHTML = '<li onclick="selectTarget(\'Général\')"><b># Général</b></li>';
-    
-    users.forEach(user => {
-        if (user !== myPseudo) { // Éviter de s'afficher soi-même
-            userList.innerHTML += `<li onclick="selectTarget('${user}')">👤 ${user}</li>`;
-        }
-    });
-});
-
-// 2. Sélectionner une conversation (Général ou Privée)
-function selectTarget(target) {
-    currentTarget = target;
-    document.getElementById('chat-header').innerText = "Discussion avec : " + target;
-    document.getElementById('messages').innerHTML = ''; // Vider la fenêtre de tchat
-
-    if (target === 'Général') {
-        socket.emit('login_register', { token: myFirebaseToken, pseudo: myPseudo }); // Recharge le général
-    } else {
-        // Demander l'historique privé pour cette cible
-        socket.emit('get_private_history', { target: target });
-    }
-}
-
-// 3. Réception de l'historique privé
-socket.on('load_private_history', function(data) {
-    if (data.target === currentTarget) {
-        data.history.forEach(msg => {
-            displayMessage(msg);
-        });
-    }
-});
-
-        firebase.auth().onAuthStateChanged((user) => {
+        window.fbOnAuthStateChanged((user) => {
             if (user) {
                 user.getIdToken().then((idToken) => {
                     socket.emit('login_register', {
@@ -267,7 +259,7 @@ socket.on('load_private_history', function(data) {
                 document.getElementById('auth-box').style.display = 'none';
                 document.getElementById('chat-area').style.display = 'flex';
                 document.getElementById('my-name').innerHTML = `Connecté : <b>${myPseudo} ${isAdmin ? '<span class="badge bg-danger">ADMIN</span>' : ''}</b>`;
-                
+
                 if (isAdmin) {
                     document.getElementById('admin-panel').style.display = 'block';
                 }
@@ -276,7 +268,7 @@ socket.on('load_private_history', function(data) {
                 setInterval(() => socket.emit('heartbeat', myPseudo), 15000);
             } else {
                 showAuthError(data.message || "Connexion refusée par le serveur.");
-                firebase.auth().signOut();
+                window.fbSignOut();
             }
         });
 
@@ -311,10 +303,10 @@ socket.on('load_private_history', function(data) {
         function renderTabs() {
             const container = document.getElementById('chat-tabs');
             container.innerHTML = `<div class="tab ${currentTab === 'Général' ? 'active' : ''}" onclick="switchTab('Général')">🌍 Général ${unreadCounts['Général'] ? `<span class="notif-badge">${unreadCounts['Général']}</span>` : ''}</div>`;
-            Object.keys(conversations).forEach(name => { 
+            Object.keys(conversations).forEach(name => {
                 if(name !== 'Général') {
                     const icon = name.startsWith('🕵️') ? '' : '👤 ';
-                    container.innerHTML += `<div class="tab ${currentTab === name ? 'active' : ''}" onclick="switchTab('${name}')">${icon}${name} ${unreadCounts[name] ? `<span class="notif-badge">${unreadCounts[name]}</span>` : ''} <span class="ms-2" onclick="event.stopPropagation(); delete conversations['${name}']; switchTab('Général')">×</span></div>`; 
+                    container.innerHTML += `<div class="tab ${currentTab === name ? 'active' : ''}" onclick="switchTab('${name}')">${icon}${name} ${unreadCounts[name] ? `<span class="notif-badge">${unreadCounts[name]}</span>` : ''} <span class="ms-2" onclick="event.stopPropagation(); delete conversations['${name}']; switchTab('Général')">×</span></div>`;
                 }
             });
         }
@@ -337,8 +329,7 @@ socket.on('load_private_history', function(data) {
 
         socket.on('update_users', (list) => {
             const el = document.getElementById('user-list'); el.innerHTML = '';
-            
-            // Mettre à jour les sélecteurs admin
+
             const sel1 = document.getElementById('admin-user1');
             const sel2 = document.getElementById('admin-user2');
             const val1 = sel1.value; const val2 = sel2.value;
@@ -348,12 +339,11 @@ socket.on('load_private_history', function(data) {
 
             list.forEach(u => {
                 const li = document.createElement('li'); li.className = 'user-item';
-                let banBtn = (isAdmin && u !== "william") ? `<button class="btn btn-sm btn-danger" onclick="banUser('${u}')">Ban</button>` : '';
+                let banBtn = (isAdmin && u !== myPseudo) ? `<button class="btn btn-sm btn-danger" onclick="banUser('${u}')">Ban</button>` : '';
                 li.innerHTML = `<span>${u} ${u === myPseudo ? '(Moi)' : ''}</span> ${banBtn}`;
                 if(u !== myPseudo) li.onclick = (e) => { if(e.target.tagName !== 'BUTTON') { if(!conversations[u]) { conversations[u] = []; socket.emit('get_private_history', {user: myPseudo, target: u}); } switchTab(u); } };
                 el.appendChild(li);
 
-                // On remplit les listes déroulantes de l'admin
                 sel1.innerHTML += `<option value="${u}">${u}</option>`;
                 sel2.innerHTML += `<option value="${u}">${u}</option>`;
             });
@@ -361,7 +351,6 @@ socket.on('load_private_history', function(data) {
             sel1.value = val1; sel2.value = val2;
         });
 
-        // --- FONCTIONS ESPIONNAGE ADMIN ---
         function adminInspectConversation() {
             const u1 = document.getElementById('admin-user1').value;
             const u2 = document.getElementById('admin-user2').value;
