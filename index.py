@@ -1,229 +1,468 @@
-import json
-import os
-import socket
-import time
-from flask import Flask, render_template, request
-from flask_socketio import SocketIO, emit, join_room
-from zeroconf import ServiceInfo, Zeroconf
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>ProChat | Cloud File Edition</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 
-import firebase_admin
-from firebase_admin import credentials, auth as fb_auth
+    <style>
+        body { background: #0f0c29; height: 100vh; display: flex; align-items: center; justify-content: center; font-family: 'Segoe UI', sans-serif; margin: 0; color: white; overflow: hidden; }
+        #auth-box { background: white; padding: 2.5rem; border-radius: 20px; width: 380px; color: #333; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        #chat-area { display: none; width: 98%; max-width: 1300px; height: 92vh; background: white; border-radius: 25px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.6); position: relative; }
+        .main-container { display: flex; width: 100%; height: 100%; }
+        .sidebar { width: 300px; background: #1a1a2e; color: white; display: flex; flex-direction: column; border-right: 1px solid #2d2d44; }
+        .chat-main { flex-grow: 1; display: flex; flex-direction: column; background: #f8f9fa; color: #333; position: relative; }
+        .sidebar-header { padding: 20px; background: #16213e; font-weight: bold; text-align: center; }
+        #user-list { padding: 15px; list-style: none; overflow-y: auto; flex-grow: 1; margin: 0; }
+        .user-item { padding: 10px; margin-bottom: 8px; border-radius: 12px; background: rgba(255,255,255,0.05); cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+        .user-item:hover { background: rgba(255,255,255,0.15); }
+        .chat-nav { background: #e9ecef; display: flex; padding: 10px 20px; gap: 10px; border-bottom: 1px solid #ddd; overflow-x: auto; }
+        .tab { padding: 8px 20px; background: #dee2e6; border-radius: 20px; cursor: pointer; font-size: 0.85rem; font-weight: bold; position: relative; white-space: nowrap; }
+        .tab.active { background: #4361ee; color: white; }
+        .notif-badge { position: absolute; top: -8px; right: -8px; background: #ff4d4d; color: white; border-radius: 50%; padding: 2px 7px; font-size: 0.7rem; border: 2px solid white; }
+        #chat-window { flex-grow: 1; padding: 25px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+        .message-wrapper { max-width: 75%; display: flex; flex-direction: column; }
+        .msg-bubble { padding: 10px 15px; border-radius: 18px; font-size: 0.9rem; }
+        .msg-me { background: #4361ee; color: white; align-self: flex-end; border-bottom-right-radius: 2px; }
+        .msg-other { background: white; align-self: flex-start; border-bottom-left-radius: 2px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .file-box { display: flex; align-items: center; gap: 10px; text-decoration: none; color: inherit; background: rgba(0,0,0,0.05); padding: 10px; border-radius: 10px; border: 1px dashed #ccc; }
+        .btn-delete { color: #ff4d4d; cursor: pointer; font-size: 0.7rem; margin-left: 10px; visibility: hidden; }
+        .message-wrapper:hover .btn-delete { visibility: visible; }
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'chat_ultra_pro_2026')
-socketio = SocketIO(app, cors_allowed_origins="*", allow_unsafe_werkzeug=True, max_http_buffer_size=50 * 1024 * 1024)
+        /* Auth box */
+        .auth-tabs { display: flex; margin-bottom: 1.5rem; border-radius: 12px; overflow: hidden; border: 1px solid #ddd; }
+        .auth-tab-btn { flex: 1; padding: 10px; text-align: center; cursor: pointer; background: #f1f1f1; font-weight: bold; font-size: 0.9rem; }
+        .auth-tab-btn.active { background: #4361ee; color: white; }
+        #auth-error { color: #ff4d4d; font-size: 0.85rem; margin-top: -0.5rem; margin-bottom: 1rem; display: none; }
 
-DATA_FILE = 'chat_data.json'
-ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'TON_EMAIL_ADMIN@exemple.com')
+        /* Panneau Admin Espionnage */
+        #admin-panel { background: #16213e; border-top: 2px solid #ff4d4d; }
+        #admin-panel .admin-panel-title { color: #ff4d4d; font-weight: bold; margin-bottom: 8px; font-size: 0.85rem; }
 
-data_storage = {
-    "users": {},           # uid -> pseudo
-    "general_history": [],
-    "private_history": {},
-    "leaderboard": []
-}
+        /* Snake game */
+        #snake-overlay {
+            display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(10, 10, 25, 0.95); z-index: 1000; flex-direction: row;
+            align-items: center; justify-content: center; backdrop-filter: blur(8px); gap: 20px; padding: 20px;
+        }
+        .game-wrapper { display: flex; align-items: flex-start; gap: 20px; max-height: 90%; }
+        .game-container { background: #1a1a2e; padding: 15px; border-radius: 20px; border: 3px solid #4361ee; box-shadow: 0 0 50px rgba(67, 97, 238, 0.3); text-align: center; }
+        #snake-canvas { background: #050510; border: 2px solid #2d2d44; border-radius: 10px; display: block; width: 320px; height: 320px; }
+        .game-ui { color: white; margin-bottom: 10px; }
+        .game-header { font-size: 1.2rem; font-weight: bold; color: #4361ee; text-shadow: 0 0 10px rgba(67, 97, 238, 0.5); margin-bottom: 2px; }
+        .score-box { font-family: 'Courier New', monospace; font-size: 1rem; background: #0f0c29; padding: 3px 12px; border-radius: 8px; display: inline-block; border: 1px solid #4361ee; }
+        .leaderboard-container { background: #1a1a2e; padding: 15px; border-radius: 20px; border: 2px solid #ffac33; width: 220px; color: white; box-shadow: 0 0 30px rgba(255, 172, 51, 0.2); align-self: stretch; display: flex; flex-direction: column; }
+        .leaderboard-title { color: #ffac33; font-weight: bold; text-align: center; margin-bottom: 10px; border-bottom: 1px solid #ffac33; padding-bottom: 5px; font-size: 0.9rem;}
+        #leaderboard-list { list-style: none; padding: 0; margin: 0; font-size: 0.8rem; overflow-y: auto; }
+        .leader-item { display: flex; justify-content: space-between; padding: 4px 8px; margin-bottom: 4px; border-radius: 5px; background: rgba(255,255,255,0.05); }
+        .leader-item:nth-child(1) { background: rgba(255, 215, 0, 0.2); border: 1px solid gold; }
+    </style>
+</head>
+<body>
 
-# Initialisation Firebase
-firebase_creds_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
-if firebase_creds_json:
-    cred = credentials.Certificate(json.loads(firebase_creds_json))
-else:
-    cred_path = os.environ.get('FIREBASE_CREDENTIALS_PATH', 'firebase-service-account.json')
-    cred = credentials.Certificate(cred_path)
+    <div id="auth-box">
+        <h2 class="text-center mb-4" style="color: #4361ee; font-weight: bold;">Sem-chat</h2>
 
-firebase_admin.initialize_app(cred)
+        <div class="auth-tabs">
+            <div class="auth-tab-btn active" id="tab-login" onclick="switchAuthTab('login')">Connexion</div>
+            <div class="auth-tab-btn" id="tab-register" onclick="switchAuthTab('register')">Inscription</div>
+        </div>
 
-# Session active : sid -> {"uid": str, "pseudo": str, "email": str, "is_admin": bool, "last_seen": float}
-active_sessions = {}
+        <div id="auth-error"></div>
 
+        <input type="text" id="pseudo" class="form-control mb-3" placeholder="Pseudo" style="display:none">
+        <input type="email" id="email" class="form-control mb-3" placeholder="Email">
+        <input type="password" id="mdp" class="form-control mb-4" placeholder="Mot de passe">
 
-def load_data():
-    global data_storage
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                loaded = json.load(f)
-                for key in data_storage:
-                    if key in loaded:
-                        data_storage[key] = loaded[key]
-        except Exception:
-            pass
+        <button class="btn btn-primary w-100" id="auth-submit-btn" onclick="handleAuthSubmit()">Entrer</button>
+    </div>
 
+    <div id="chat-area">
+        <div id="snake-overlay">
+            <div class="game-wrapper">
+                <div class="game-container">
+                    <div class="game-ui">
+                        <div class="game-header">SNAKE MINI</div>
+                        <div class="score-box">SCORE: <span id="score">0</span></div>
+                    </div>
+                    <canvas id="snake-canvas" width="320" height="320"></canvas>
+                    <div class="mt-2 d-flex gap-2 justify-content-center">
+                        <button class="btn btn-sm btn-primary" id="btn-restart" style="display:none;" onclick="startSnake()">Rejouer</button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="toggleSnake()">Quitter</button>
+                    </div>
+                </div>
 
-def save_data():
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data_storage, f, indent=4, ensure_ascii=False)
+                <div class="leaderboard-container">
+                    <div class="leaderboard-title">🏆 TOP 10</div>
+                    <ul id="leaderboard-list"></ul>
+                </div>
+            </div>
+        </div>
 
+        <div class="main-container">
+            <div class="sidebar">
+                <div class="sidebar-header">👥 UTILISATEURS</div>
+                <ul id="user-list"></ul>
 
-load_data()
+                <!-- BARRE D'ESPIONNAGE ADMIN -->
+                <div id="admin-panel" class="p-3" style="display: none;">
+                    <div class="admin-panel-title">🕵️ ESPIONNER DES MP</div>
+                    <div class="mb-2">
+                        <select id="admin-user1" class="form-select form-select-sm bg-dark text-white border-secondary mb-2">
+                            <option value="">-- Utilisateur A --</option>
+                        </select>
+                        <select id="admin-user2" class="form-select form-select-sm bg-dark text-white border-secondary">
+                            <option value="">-- Utilisateur B --</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-danger btn-sm w-100 fw-bold" onclick="adminInspectConversation()">Inspecter Chat</button>
+                </div>
 
+                <div class="p-2">
+                    <button class="btn btn-warning w-100 fw-bold shadow-sm" onclick="toggleSnake()">🎮 ARCADE JEUX</button>
+                </div>
+                <div class="p-3 bg-dark" id="my-name">Connecté : <b></b></div>
+                <div class="p-2">
+                    <button class="btn btn-outline-light btn-sm w-100" onclick="logout()">Déconnexion</button>
+                </div>
+            </div>
+            <div class="chat-main">
+                <div class="chat-nav" id="chat-tabs"></div>
+                <div id="chat-window"></div>
+                <div class="p-3 bg-white border-top">
+                    <div class="input-group">
+                        <button class="btn btn-light border" onclick="document.getElementById('file-input').click()">📎</button>
+                        <input type="file" id="file-input" style="display:none" onchange="sendFile(this)">
+                        <input type="text" id="msg" class="form-control" placeholder="Écrivez...">
+                        <button class="btn btn-primary" onclick="sendMsg()">Envoyer</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+    <!-- ============================================================
+         FIREBASE — nouveau SDK modulaire (v9+), chargé via ESM depuis
+         le CDN gstatic. On expose sur window les quelques fonctions
+         dont le reste du code (non-module, classique) a besoin, car
+         un script type="module" a son propre scope isolé.
+         ============================================================ -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-analytics.js";
+        import {
+            getAuth,
+            onAuthStateChanged,
+            signInWithEmailAndPassword,
+            createUserWithEmailAndPassword,
+            updateProfile,
+            signOut
+        } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 
+        const firebaseConfig = {
+            apiKey: "AIzaSyBQxtrpW96MQ7rWr52ErH3G6aq_06pfO-I",
+            authDomain: "sem-chat-40c32.firebaseapp.com",
+            projectId: "sem-chat-40c32",
+            storageBucket: "sem-chat-40c32.firebasestorage.app",
+            messagingSenderId: "324099007763",
+            appId: "1:324099007763:web:88278df1985b7e8bab66e6",
+            measurementId: "G-L2QVZXJGSF"
+        };
 
-@socketio.on('login_register')
-def handle_auth(data):
-    token = data.get('token', '')
-    requested_pseudo = (data.get('pseudo') or '').strip()
+        const fbApp = initializeApp(firebaseConfig);
+        try { getAnalytics(fbApp); } catch (e) { /* analytics bloqué (ex: adblock) : pas grave, on continue */ }
 
-    try:
-        decoded = fb_auth.verify_id_token(token)
-    except Exception:
-        emit('auth_response', {'success': False, 'message': 'Session invalide, reconnecte-toi.'})
-        return
+        const auth = getAuth(fbApp);
 
-    uid = decoded['uid']
-    email = decoded.get('email', '')
-    pseudo = requested_pseudo or email or uid
-    is_admin = (email == ADMIN_EMAIL)
+        // Pont vers le script classique plus bas (non-module) qui gère
+        // le chat, le pseudo, etc.
+        window.fbSignIn = (email, mdp) => signInWithEmailAndPassword(auth, email, mdp);
+        window.fbSignUp = (email, mdp) => createUserWithEmailAndPassword(auth, email, mdp);
+        window.fbUpdateProfile = (user, profile) => updateProfile(user, profile);
+        window.fbSignOut = () => signOut(auth);
+        window.fbOnAuthStateChanged = (callback) => onAuthStateChanged(auth, callback);
+    </script>
 
-    # Empêcher la double connexion
-    if any(sess['uid'] == uid for sess in active_sessions.values()):
-        emit('auth_response', {'success': False, 'message': 'Ce compte est déjà connecté sur un autre appareil.'})
-        return
+    <script>
+        let authMode = "login";
 
-    data_storage["users"][uid] = pseudo
-    save_data()
+        function switchAuthTab(mode) {
+            authMode = mode;
+            document.getElementById('tab-login').classList.toggle('active', mode === 'login');
+            document.getElementById('tab-register').classList.toggle('active', mode === 'register');
+            document.getElementById('pseudo').style.display = mode === 'register' ? 'block' : 'none';
+            document.getElementById('auth-submit-btn').innerText = mode === 'register' ? "Créer mon compte" : "Entrer";
+            document.getElementById('auth-error').style.display = 'none';
+        }
 
-    # Enregistrement de la session liée au sid unique de la connexion WebSocket
-    active_sessions[request.sid] = {
-        "uid": uid,
-        "pseudo": pseudo,
-        "email": email,
-        "is_admin": is_admin,
-        "last_seen": time.time()
-    }
+        function showAuthError(msg) {
+            const el = document.getElementById('auth-error');
+            el.innerText = msg;
+            el.style.display = 'block';
+        }
 
-    join_room(pseudo)
+        function handleAuthSubmit() {
+            const email = document.getElementById('email').value.trim();
+            const mdp = document.getElementById('mdp').value;
+            const pseudo = document.getElementById('pseudo').value.trim();
 
-    emit('auth_response', {'success': True, 'pseudo': pseudo, 'is_admin': is_admin})
-    emit('load_history', data_storage["general_history"])
-    emit('update_users', [s["pseudo"] for s in active_sessions.values()], broadcast=True)
+            if (!email || !mdp) { showAuthError("Email et mot de passe requis."); return; }
 
+            if (authMode === 'register') {
+                if (!pseudo) { showAuthError("Choisis un pseudo."); return; }
+                window.fbSignUp(email, mdp)
+                    .then((cred) => window.fbUpdateProfile(cred.user, { displayName: pseudo }))
+                    .catch((err) => showAuthError(traduireErreur(err)));
+            } else {
+                window.fbSignIn(email, mdp)
+                    .catch((err) => showAuthError(traduireErreur(err)));
+            }
+        }
 
-@socketio.on('message')
-def handle_message(data):
-    session = active_sessions.get(request.sid)
-    if not session:
-        return
+        function traduireErreur(err) {
+            switch (err.code) {
+                case 'auth/email-already-in-use': return "Cet email est déjà utilisé.";
+                case 'auth/invalid-email': return "Email invalide.";
+                case 'auth/weak-password': return "Mot de passe trop court (6 caractères min).";
+                case 'auth/unauthorized-domain': return "Ce domaine n'est pas autorisé dans Firebase (Authentication > Settings > Authorized domains).";
+                case 'auth/user-not-found':
+                case 'auth/wrong-password':
+                case 'auth/invalid-credential': return "Email ou mot de passe incorrect.";
+                default: return err.message;
+            }
+        }
 
-    # Utilisation du pseudo authentifié pour éviter l'usurpation
-    sender_pseudo = session["pseudo"]
-    target = data.get('target', 'Général')
+        function logout() {
+            window.fbSignOut().then(() => location.reload());
+        }
 
-    msg_payload = {
-        'id': int(time.time() * 1000),
-        'user': sender_pseudo,
-        'text': data.get('text', ''),
-        'target': target
-    }
+        const socket = io();
+        let myPseudo = "", isAdmin = false, currentTab = "Général";
+        let conversations = { "Général": [] };
+        let unreadCounts = {};
 
-    if target == 'Général':
-        data_storage["general_history"].append(msg_payload)
-        if len(data_storage["general_history"]) > 100:
-            data_storage["general_history"].pop(0)
-        emit('message', msg_payload, broadcast=True)
-    else:
-        room_key = "-".join(sorted([sender_pseudo, target]))
-        if room_key not in data_storage["private_history"]:
-            data_storage["private_history"][room_key] = []
-        data_storage["private_history"][room_key].append(msg_payload)
-        emit('private_message', msg_payload, room=target)
-        emit('private_message', msg_payload, room=sender_pseudo)
+        window.fbOnAuthStateChanged((user) => {
+            if (user) {
+                user.getIdToken().then((idToken) => {
+                    socket.emit('login_register', {
+                        pseudo: user.displayName || user.email,
+                        token: idToken
+                    });
+                });
+            }
+        });
 
-    save_data()
+        socket.on('auth_response', (data) => {
+            if (data.success) {
+                myPseudo = data.pseudo; isAdmin = data.is_admin;
+                document.getElementById('auth-box').style.display = 'none';
+                document.getElementById('chat-area').style.display = 'flex';
+                document.getElementById('my-name').innerHTML = `Connecté : <b>${myPseudo} ${isAdmin ? '<span class="badge bg-danger">ADMIN</span>' : ''}</b>`;
 
+                if (isAdmin) {
+                    document.getElementById('admin-panel').style.display = 'block';
+                }
 
-@socketio.on('delete_message')
-def delete_message(msg_id, *args):
-    session = active_sessions.get(request.sid)
-    # Vérification stricte du rôle admin serveur
-    if not session or not session.get('is_admin'):
-        return
+                renderTabs();
+                setInterval(() => socket.emit('heartbeat', myPseudo), 15000);
+            } else {
+                showAuthError(data.message || "Connexion refusée par le serveur.");
+                window.fbSignOut();
+            }
+        });
 
-    data_storage["general_history"] = [m for m in data_storage["general_history"] if m.get('id') != msg_id]
-    for key in data_storage["private_history"]:
-        data_storage["private_history"][key] = [m for m in data_storage["private_history"][key] if m.get('id') != msg_id]
+        function renderMessages() {
+            const container = document.getElementById('chat-window');
+            container.innerHTML = '';
+            (conversations[currentTab] || []).forEach(m => {
+                const isMe = m.user === myPseudo;
+                const wrapper = document.createElement('div');
+                wrapper.className = isMe ? 'message-wrapper align-self-end' : 'message-wrapper align-self-start';
+                let deleteBtn = isAdmin ? `<span class="btn-delete" onclick="deleteMsg(${m.id})">🗑️</span>` : '';
+                let content = (m.type === 'image') ? `<img src="${m.text}" style="max-width:250px; border-radius:10px; cursor:pointer;" onclick="window.open(this.src)">` : (m.type === 'file') ? `<a href="${m.text}" download="${m.fileName}" class="file-box"><span>📄</span><div style="font-size:0.8rem;"><b>Fichier :</b><br>${m.fileName}</div></a>` : m.text;
+                wrapper.innerHTML = `<small class="text-muted mb-1 ${isMe ? 'text-end' : ''}">${isMe ? '' : m.user} ${deleteBtn}</small><div class="msg-bubble ${isMe ? 'msg-me' : 'msg-other'}">${content}</div>`;
+                container.appendChild(wrapper);
+            });
+            container.scrollTop = container.scrollHeight;
+        }
 
-    save_data()
-    emit('message_deleted', msg_id, broadcast=True)
+        function sendFile(input) {
+            if (input.files[0]) {
+                const file = input.files[0];
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const type = file.type.startsWith('image/') ? 'image' : 'file';
+                    socket.emit('message', {user: myPseudo, text: e.target.result, type: type, fileName: file.name, target: currentTab});
+                };
+                reader.readAsDataURL(file);
+                input.value = "";
+            }
+        }
 
+        function renderTabs() {
+            const container = document.getElementById('chat-tabs');
+            container.innerHTML = `<div class="tab ${currentTab === 'Général' ? 'active' : ''}" onclick="switchTab('Général')">🌍 Général ${unreadCounts['Général'] ? `<span class="notif-badge">${unreadCounts['Général']}</span>` : ''}</div>`;
+            Object.keys(conversations).forEach(name => {
+                if(name !== 'Général') {
+                    const icon = name.startsWith('🕵️') ? '' : '👤 ';
+                    container.innerHTML += `<div class="tab ${currentTab === name ? 'active' : ''}" onclick="switchTab('${name}')">${icon}${name} ${unreadCounts[name] ? `<span class="notif-badge">${unreadCounts[name]}</span>` : ''} <span class="ms-2" onclick="event.stopPropagation(); delete conversations['${name}']; switchTab('Général')">×</span></div>`;
+                }
+            });
+        }
 
-@socketio.on('ban_user')
-def ban_user(data):
-    session = active_sessions.get(request.sid)
-    # Vérification stricte du rôle admin serveur
-    if not session or not session.get('is_admin'):
-        return
+        function switchTab(t) { currentTab = t; unreadCounts[t] = 0; renderTabs(); renderMessages(); }
 
-    target_pseudo = data.get('target')
-    target_uid = next((u for u, p in data_storage["users"].items() if p == target_pseudo), None)
+        socket.on('message', (d) => {
+            conversations["Général"].push(d);
+            if(currentTab !== "Général") unreadCounts["Général"] = (unreadCounts["Général"] || 0) + 1;
+            renderTabs(); if(currentTab === "Général") renderMessages();
+        });
 
-    if target_uid:
-        del data_storage["users"][target_uid]
+        socket.on('private_message', (d) => {
+            const partner = (d.user === myPseudo) ? d.target : d.user;
+            if(!conversations[partner]) conversations[partner] = [];
+            conversations[partner].push(d);
+            if(currentTab !== partner) unreadCounts[partner] = (unreadCounts[partner] || 0) + 1;
+            renderTabs(); if(currentTab === partner) renderMessages();
+        });
 
-        # Déconnexion forcée des sessions actives de la cible
-        sids_to_remove = [sid for sid, s in active_sessions.items() if s["uid"] == target_uid]
-        for sid in sids_to_remove:
-            del active_sessions[sid]
+        socket.on('update_users', (list) => {
+            const el = document.getElementById('user-list'); el.innerHTML = '';
 
-        save_data()
+            const sel1 = document.getElementById('admin-user1');
+            const sel2 = document.getElementById('admin-user2');
+            const val1 = sel1.value; const val2 = sel2.value;
 
-        try:
-            fb_auth.revoke_refresh_tokens(target_uid)
-        except Exception:
-            pass
+            sel1.innerHTML = '<option value="">-- Utilisateur A --</option>';
+            sel2.innerHTML = '<option value="">-- Utilisateur B --</option>';
 
-        emit('user_banned_notice', target_pseudo, broadcast=True)
-        emit('update_users', [s["pseudo"] for s in active_sessions.values()], broadcast=True)
+            list.forEach(u => {
+                const li = document.createElement('li'); li.className = 'user-item';
+                let banBtn = (isAdmin && u !== myPseudo) ? `<button class="btn btn-sm btn-danger" onclick="banUser('${u}')">Ban</button>` : '';
+                li.innerHTML = `<span>${u} ${u === myPseudo ? '(Moi)' : ''}</span> ${banBtn}`;
+                if(u !== myPseudo) li.onclick = (e) => { if(e.target.tagName !== 'BUTTON') { if(!conversations[u]) { conversations[u] = []; socket.emit('get_private_history', {user: myPseudo, target: u}); } switchTab(u); } };
+                el.appendChild(li);
 
+                sel1.innerHTML += `<option value="${u}">${u}</option>`;
+                sel2.innerHTML += `<option value="${u}">${u}</option>`;
+            });
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    if request.sid in active_sessions:
-        del active_sessions[request.sid]
-        emit('update_users', [s["pseudo"] for s in active_sessions.values()], broadcast=True)
-@socketio.on('get_private_history')
-def send_private_history(data):
-    session = active_sessions.get(request.sid)
-    if not session:
-        return
+            sel1.value = val1; sel2.value = val2;
+        });
 
-    user_pseudo = session["pseudo"]  # Récupéré depuis la session serveur sécurisée
-    target = data.get('target')
+        function adminInspectConversation() {
+            const u1 = document.getElementById('admin-user1').value;
+            const u2 = document.getElementById('admin-user2').value;
 
-    if not target:
-        return
+            if (!u1 || !u2) { alert("Sélectionne deux utilisateurs !"); return; }
+            if (u1 === u2) { alert("Choisis deux utilisateurs différents !"); return; }
 
-    # Clé de salon unique alphabétique (ex: "Alice-Bob")
-    room_key = "-".join(sorted([user_pseudo, target]))
-    history = data_storage["private_history"].get(room_key, [])
-    
-    emit('load_private_history', {'target': target, 'history': history})
-@socketio.on('admin_get_private_history')
-def admin_get_private_history(data):
-    session = active_sessions.get(request.sid)
-    # Vérification stricte du rôle admin côté serveur (ne jamais faire confiance au client)
-    if not session or not session.get('is_admin'):
-        return
+            const tabName = `🕵️ ${u1} ↔ ${u2}`;
+            if (!conversations[tabName]) conversations[tabName] = [];
 
-    user1 = (data.get('user1') or '').strip()
-    user2 = (data.get('user2') or '').strip()
-    if not user1 or not user2 or user1 == user2:
-        return
+            socket.emit('admin_get_private_history', { admin: myPseudo, user1: u1, user2: u2 });
+            switchTab(tabName);
+        }
 
-    room_key = "-".join(sorted([user1, user2]))
-    history = data_storage["private_history"].get(room_key, [])
+        socket.on('load_admin_private_history', (d) => {
+            const tabName = `🕵️ ${d.user1} ↔ ${d.user2}`;
+            conversations[tabName] = d.history;
+            if (currentTab === tabName) renderMessages();
+        });
 
-    # Journalisation de la consultation, pour la traçabilité/conformité
-    data_storage.setdefault("admin_audit_log", []).append({
-        'ts': time.time(),
-        'admin_pseudo': session["pseudo"],
-        'admin_uid': session["uid"],
-        'inspected_pair': room_key
-    })
-    save_data()
+        function deleteMsg(id) { if(confirm("Supprimer ?")) socket.emit('delete_message', id, myPseudo); }
+        function banUser(t) { if(confirm("Bannir " + t + " ?")) socket.emit('ban_user', {target: t, requester: myPseudo}); }
+        socket.on('message_deleted', (id) => { for(let k in conversations) conversations[k] = conversations[k].filter(m => m.id !== id); renderMessages(); });
+        socket.on('user_banned_notice', (t) => { if(myPseudo === t) { alert("Banni !"); location.reload(); } });
+        socket.on('load_history', (h) => { conversations["Général"] = h; renderMessages(); });
+        socket.on('load_private_history', (d) => { conversations[d.target] = d.history; if(currentTab === d.target) renderMessages(); });
+        function sendMsg() { const i = document.getElementById('msg'); if (i.value.trim() !== "") { socket.emit('message', {user: myPseudo, text: i.value, type: 'text', target: currentTab}); i.value = ""; } }
+        document.addEventListener("keypress", (e) => { if (e.key === "Enter") sendMsg(); });
 
-    emit('load_admin_private_history', {'user1': user1, 'user2': user2, 'history': history})
+        // --- SNAKE MINI + LEADERBOARD ---
+        let snakeInterval;
+        let isPaused = false;
+        let snakeDirection = "RIGHT";
+        let nextDirection = "RIGHT";
+
+        function toggleSnake() {
+            const overlay = document.getElementById('snake-overlay');
+            if(overlay.style.display === 'flex') {
+                overlay.style.display = 'none';
+                clearInterval(snakeInterval);
+                document.removeEventListener("keydown", handleKeydown);
+            } else {
+                overlay.style.display = 'flex';
+                document.getElementById('btn-restart').style.display = 'none';
+                socket.emit('get_leaderboard');
+                startSnake();
+            }
+        }
+
+        socket.on('update_leaderboard', (scores) => {
+            const list = document.getElementById('leaderboard-list');
+            list.innerHTML = scores.map((s, i) => `<li class="leader-item"><span>${i+1}. ${s.pseudo}</span><b>${s.score}</b></li>`).join('');
+        });
+
+        function handleKeydown(e) {
+            const keys = {37: "LEFT", 38: "UP", 39: "RIGHT", 40: "DOWN"};
+            if(keys[e.keyCode]) {
+                const newDir = keys[e.keyCode];
+                if(newDir === "LEFT" && snakeDirection !== "RIGHT") nextDirection = "LEFT";
+                if(newDir === "UP" && snakeDirection !== "DOWN") nextDirection = "UP";
+                if(newDir === "RIGHT" && snakeDirection !== "LEFT") nextDirection = "RIGHT";
+                if(newDir === "DOWN" && snakeDirection !== "UP") nextDirection = "DOWN";
+                e.preventDefault();
+            }
+            if(e.keyCode === 32) { isPaused = !isPaused; e.preventDefault(); }
+        }
+
+        function startSnake() {
+            const canvas = document.getElementById("snake-canvas");
+            const ctx = canvas.getContext("2d");
+            const box = 16;
+            let score = 0;
+            let snake = [{x: 10 * box, y: 10 * box}, {x: 9 * box, y: 10 * box}];
+            let food = {x: Math.floor(Math.random() * (canvas.width/box)) * box, y: Math.floor(Math.random() * (canvas.height/box)) * box};
+
+            snakeDirection = "RIGHT"; nextDirection = "RIGHT"; isPaused = false;
+            document.getElementById('score').innerText = score;
+            document.getElementById('btn-restart').style.display = 'none';
+            clearInterval(snakeInterval);
+            document.addEventListener("keydown", handleKeydown);
+
+            function draw() {
+                if(isPaused) return;
+                ctx.fillStyle = "#050510"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "#ff4d4d"; ctx.fillRect(food.x+2, food.y+2, box-4, box-4);
+
+                snakeDirection = nextDirection;
+                for(let i = 0; i < snake.length; i++) {
+                    ctx.fillStyle = (i == 0) ? "#4361ee" : "#3f37c9";
+                    ctx.fillRect(snake[i].x, snake[i].y, box, box);
+                }
+
+                let snakeX = snake[0].x, snakeY = snake[0].y;
+                if(snakeDirection == "LEFT") snakeX -= box; else if(snakeDirection == "UP") snakeY -= box;
+                else if(snakeDirection == "RIGHT") snakeX += box; else if(snakeDirection == "DOWN") snakeY += box;
+
+                if(snakeX < 0 || snakeX >= canvas.width || snakeY < 0 || snakeY >= canvas.height || snake.some((seg, idx) => idx !== 0 && seg.x === snakeX && seg.y === snakeY)) {
+                    clearInterval(snakeInterval);
+                    ctx.fillStyle = "white"; ctx.font = "20px Arial"; ctx.fillText("GAME OVER", canvas.width/2 - 60, canvas.height/2);
+                    document.getElementById('btn-restart').style.display = 'block';
+                    socket.emit('save_score', {pseudo: myPseudo, score: score});
+                    return;
+                }
+
+                if(snakeX == food.x && snakeY == food.y) {
+                    score++; document.getElementById('score').innerText = score;
+                    food = {x: Math.floor(Math.random() * (canvas.width/box)) * box, y: Math.floor(Math.random() * (canvas.height/box)) * box};
+                } else { snake.pop(); }
+                snake.unshift({x: snakeX, y: snakeY});
+            }
+            snakeInterval = setInterval(draw, 100);
+        }
+    </script>
+</body>
+</html>
